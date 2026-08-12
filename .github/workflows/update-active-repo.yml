@@ -1,0 +1,215 @@
+name: Update Active Repository
+
+on:
+  schedule:
+    - cron: "15 */6 * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-active-repository:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout profile
+        uses: actions/checkout@v6
+
+      - name: Find active repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+          import urllib.parse
+
+          from collections import defaultdict
+          from pathlib import Path
+
+
+          USERNAME = "SachinK862007"
+
+          scores = defaultdict(int)
+          latest = {}
+
+
+          for page in range(1, 4):
+
+              url = (
+                  f"https://api.github.com/users/"
+                  f"{USERNAME}/events/public"
+                  f"?per_page=100&page={page}"
+              )
+
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  },
+              )
+
+              with urllib.request.urlopen(request) as response:
+                  events = json.load(response)
+
+
+              if not events:
+                  break
+
+
+              for event in events:
+
+                  event_type = event.get("type")
+
+                  if event_type not in {
+                      "PushEvent",
+                      "PullRequestEvent",
+                  }:
+                      continue
+
+
+                  repo = event.get("repo", {}).get("name")
+
+                  if not repo:
+                      continue
+
+
+                  if repo.lower() == f"{USERNAME}/{USERNAME}".lower():
+                      continue
+
+
+                  created = event.get("created_at", "")
+
+
+                  if event_type == "PushEvent":
+
+                      payload = event.get("payload", {})
+
+                      amount = (
+                          payload.get("distinct_size")
+                          or payload.get("size")
+                          or 1
+                      )
+
+                      scores[repo] += max(int(amount), 1)
+
+
+                  elif event_type == "PullRequestEvent":
+
+                      action = event.get(
+                          "payload",
+                          {}
+                      ).get("action")
+
+                      if action in {
+                          "opened",
+                          "reopened",
+                          "synchronize",
+                          "closed",
+                      }:
+
+                          scores[repo] += 1
+
+
+                  if repo not in latest or created > latest[repo]:
+                      latest[repo] = created
+
+
+          if not scores:
+              print("No recent public activity found.")
+              raise SystemExit(0)
+
+
+          active_repo = max(
+              scores,
+              key=lambda repo: (
+                  scores[repo],
+                  latest.get(repo, "")
+              )
+          )
+
+
+          owner, repo_name = active_repo.split("/", 1)
+
+
+          encoded_owner = urllib.parse.quote(owner, safe="")
+          encoded_repo = urllib.parse.quote(repo_name, safe="")
+
+
+          repo_card = f"""
+          <a href="https://github.com/{active_repo}">
+          <img
+            src="https://github-readme-stats.vercel.app/api/pin/?username={encoded_owner}&repo={encoded_repo}&theme=nightowl&hide_border=true&show_owner=true&description_lines_count=2"
+            width="300"
+            alt="{repo_name}">
+          </a>
+          """.strip()
+
+
+          readme_path = Path("README.md")
+
+          readme = readme_path.read_text(
+              encoding="utf-8"
+          )
+
+
+          start = "<!-- ACTIVE-REPO-START -->"
+          end = "<!-- ACTIVE-REPO-END -->"
+
+
+          pattern = re.compile(
+              re.escape(start)
+              + r".*?"
+              + re.escape(end),
+              re.DOTALL,
+          )
+
+
+          replacement = (
+              f"{start}\n"
+              f"{repo_card}\n"
+              f"{end}"
+          )
+
+
+          if not pattern.search(readme):
+              raise RuntimeError(
+                  "ACTIVE-REPO markers are missing."
+              )
+
+
+          new_readme = pattern.sub(
+              replacement,
+              readme
+          )
+
+
+          readme_path.write_text(
+              new_readme,
+              encoding="utf-8"
+          )
+
+
+          print(f"Active repository: {active_repo}")
+          PY
+
+
+      - name: Save update
+        run: |
+          if git diff --quiet; then
+            echo "Repository has not changed."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add README.md
+          git commit -m "Update active repository"
+          git push
